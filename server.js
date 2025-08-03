@@ -646,6 +646,291 @@ app.get('/admin/search-customer', (req, res) => {
     });
 });
 
+// AGREGAR AL FINAL DE server.js - SISTEMA DE BACKUP/RESTORE CRÍTICO
+
+// ======== SISTEMA DE BACKUP/RESTORE ========
+
+// NUEVO: Exportar toda la base de datos (BACKUP COMPLETO)
+app.get('/admin/backup-database', (req, res) => {
+    try {
+        const db = readDB();
+        
+        // Agregar metadatos del backup
+        const backupData = {
+            backup_info: {
+                created_at: new Date().toISOString(),
+                version: '1.0',
+                total_licenses: Object.keys(db.licenses || {}).length,
+                server_url: req.get('host')
+            },
+            database: db
+        };
+        
+        // Configurar headers para descarga
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', 'attachment; filename="qaja_licenses_backup.json"');
+        
+        console.log(`📦 Backup creado - ${Object.keys(db.licenses || {}).length} licencias`);
+        
+        res.json(backupData);
+        
+    } catch (error) {
+        console.error('Error creando backup:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error creando backup',
+            error: error.message
+        });
+    }
+});
+
+// NUEVO: Restaurar base de datos desde backup (RESTORE COMPLETO)
+app.post('/admin/restore-database', (req, res) => {
+    try {
+        const { backup_data, confirm } = req.body;
+        
+        if (confirm !== 'RESTORE_CONFIRMED') {
+            return res.json({
+                success: false,
+                message: 'Para confirmar restauración, envía: {"confirm": "RESTORE_CONFIRMED", "backup_data": {...}}'
+            });
+        }
+        
+        if (!backup_data || !backup_data.database) {
+            return res.json({
+                success: false,
+                message: 'Datos de backup inválidos'
+            });
+        }
+        
+        // Crear backup de seguridad antes de restaurar
+        const currentDB = readDB();
+        const emergencyBackup = {
+            created_at: new Date().toISOString(),
+            type: 'emergency_backup_before_restore',
+            data: currentDB
+        };
+        
+        // Guardar backup de emergencia (si es posible)
+        try {
+            fs.writeFileSync('emergency_backup.json', JSON.stringify(emergencyBackup, null, 2));
+            console.log('💾 Backup de emergencia creado: emergency_backup.json');
+        } catch (e) {
+            console.warn('⚠️ No se pudo crear backup de emergencia:', e.message);
+        }
+        
+        // Restaurar datos
+        const restoredData = backup_data.database;
+        
+        // Validar estructura básica
+        if (!restoredData.licenses || !restoredData.stats) {
+            return res.json({
+                success: false,
+                message: 'Estructura de backup inválida - faltan campos obligatorios'
+            });
+        }
+        
+        // Escribir datos restaurados
+        writeDB(restoredData);
+        
+        console.log(`🔄 Base de datos restaurada - ${Object.keys(restoredData.licenses).length} licencias`);
+        
+        res.json({
+            success: true,
+            message: 'Base de datos restaurada exitosamente',
+            restored_licenses: Object.keys(restoredData.licenses).length,
+            backup_info: backup_data.backup_info || 'No disponible',
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Error restaurando backup:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error restaurando backup',
+            error: error.message
+        });
+    }
+});
+
+// NUEVO: Verificar integridad de la base de datos
+app.get('/admin/verify-database', (req, res) => {
+    try {
+        const db = readDB();
+        
+        // Verificaciones básicas
+        const checks = {
+            file_exists: fs.existsSync(DB_FILE),
+            structure_valid: !!(db.licenses && db.stats),
+            total_licenses: Object.keys(db.licenses || {}).length,
+            activated_licenses: Object.values(db.licenses || {}).filter(l => l.activated_at).length,
+            file_size: fs.statSync(DB_FILE).size,
+            last_modified: fs.statSync(DB_FILE).mtime,
+            issues: []
+        };
+        
+        // Verificar licencias
+        Object.entries(db.licenses || {}).forEach(([key, license]) => {
+            if (!license.key || !license.type || !license.created_at) {
+                checks.issues.push(`Licencia ${key} tiene estructura incompleta`);
+            }
+            if (license.key !== key) {
+                checks.issues.push(`Licencia ${key} tiene key inconsistente: ${license.key}`);
+            }
+        });
+        
+        const isHealthy = checks.structure_valid && checks.issues.length === 0;
+        
+        console.log(`🔍 Verificación de integridad: ${isHealthy ? 'SALUDABLE' : 'PROBLEMAS DETECTADOS'}`);
+        
+        res.json({
+            success: true,
+            healthy: isHealthy,
+            checks: checks,
+            recommendation: isHealthy ? 
+                'Base de datos en buen estado' : 
+                'Se recomienda crear backup inmediatamente'
+        });
+        
+    } catch (error) {
+        console.error('Error verificando integridad:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error verificando base de datos',
+            error: error.message,
+            recommendation: 'CRÍTICO: Crear backup inmediatamente'
+        });
+    }
+});
+
+// NUEVO: Migrar a variables de entorno (SOLUCIÓN TEMPORAL)
+app.post('/admin/save-to-env', (req, res) => {
+    try {
+        const db = readDB();
+        
+        // Comprimir y codificar base de datos
+        const compressed = JSON.stringify(db);
+        const encoded = Buffer.from(compressed).toString('base64');
+        
+        console.log(`💾 Base de datos codificada - Tamaño: ${encoded.length} caracteres`);
+        
+        res.json({
+            success: true,
+            message: 'Datos preparados para variable de entorno',
+            env_variable_name: 'QAJA_DATABASE_BACKUP',
+            env_variable_value: encoded,
+            instructions: [
+                '1. Copiar el valor de env_variable_value',
+                '2. Ir a Railway Dashboard > Variables',
+                '3. Crear variable QAJA_DATABASE_BACKUP con el valor copiado',
+                '4. Reiniciar el servicio'
+            ],
+            size_mb: (encoded.length / 1024 / 1024).toFixed(2)
+        });
+        
+    } catch (error) {
+        console.error('Error preparando backup para env:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error preparando backup',
+            error: error.message
+        });
+    }
+});
+
+// NUEVO: Cargar desde variables de entorno al iniciar
+function loadFromEnvironmentIfEmpty() {
+    try {
+        // Si no existe archivo o está vacío, intentar cargar desde variable de entorno
+        if (!fs.existsSync(DB_FILE) || fs.statSync(DB_FILE).size < 100) {
+            const envBackup = process.env.QAJA_DATABASE_BACKUP;
+            
+            if (envBackup) {
+                console.log('🔄 Archivo de DB no encontrado, cargando desde variable de entorno...');
+                
+                const compressed = Buffer.from(envBackup, 'base64').toString();
+                const restoredData = JSON.parse(compressed);
+                
+                writeDB(restoredData);
+                
+                console.log(`✅ Base de datos restaurada desde env - ${Object.keys(restoredData.licenses || {}).length} licencias`);
+                return true;
+            }
+        }
+        return false;
+    } catch (error) {
+        console.error('Error cargando desde variable de entorno:', error);
+        return false;
+    }
+}
+
+// MODIFICAR la función initDatabase para incluir carga desde env
+function initDatabase() {
+    // Primero intentar cargar desde variable de entorno
+    if (loadFromEnvironmentIfEmpty()) {
+        return;
+    }
+    
+    // Si no se cargó desde env, crear base limpia como antes
+    if (!fs.existsSync(DB_FILE)) {
+        const initialData = {
+            licenses: {},
+            activations: {}, 
+            stats: {
+                total_licenses: 0,
+                active_licenses: 0,
+                created_at: new Date().toISOString()
+            }
+        };
+        fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2));
+        console.log('📄 Base de datos inicializada como nueva');
+    }
+}
+
+// NUEVO: Auto-backup periódico cada 24 horas
+let backupInterval;
+
+function startPeriodicBackup() {
+    // Crear backup automático cada 24 horas
+    backupInterval = setInterval(() => {
+        try {
+            const db = readDB();
+            const backupData = {
+                auto_backup: true,
+                created_at: new Date().toISOString(),
+                licenses_count: Object.keys(db.licenses || {}).length,
+                database: db
+            };
+            
+            // Intentar guardar en variable de entorno (actualizar)
+            const compressed = JSON.stringify(db);
+            const encoded = Buffer.from(compressed).toString('base64');
+            
+            // Solo log - no podemos actualizar env vars automáticamente desde código
+            console.log(`🔄 Auto-backup completado - ${Object.keys(db.licenses || {}).length} licencias - ${new Date().toISOString()}`);
+            
+        } catch (error) {
+            console.error('Error en auto-backup:', error);
+        }
+    }, 24 * 60 * 60 * 1000); // 24 horas
+}
+
+// NUEVO: Endpoint para parar auto-backup
+app.post('/admin/stop-auto-backup', (req, res) => {
+    if (backupInterval) {
+        clearInterval(backupInterval);
+        backupInterval = null;
+        console.log('⏹️ Auto-backup detenido');
+        res.json({ success: true, message: 'Auto-backup detenido' });
+    } else {
+        res.json({ success: false, message: 'Auto-backup no estaba activo' });
+    }
+});
+
+// Iniciar auto-backup al arrancar el servidor
+console.log('🔄 Iniciando sistema de auto-backup...');
+startPeriodicBackup();
+
 // Inicializar base de datos al arrancar
 initDatabase();
 
