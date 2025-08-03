@@ -442,6 +442,172 @@ app.get('/admin/export-customers', (req, res) => {
     res.send(csvContent);
 });
 
+// AGREGAR AL server.js - Sistema de Renovación Manual
+
+// NUEVO: Renovar suscripción existente
+app.post('/admin/renew-subscription', (req, res) => {
+    const { key, months = 1, payment_reference = '' } = req.body;
+    
+    if (!key) {
+        return res.json({ success: false, message: 'License key requerida' });
+    }
+    
+    const db = readDB();
+    const license = db.licenses[key];
+    
+    if (!license) {
+        return res.json({ success: false, message: 'Licencia no encontrada' });
+    }
+    
+    if (license.type !== 'suscripcion') {
+        return res.json({ success: false, message: 'Solo se pueden renovar suscripciones' });
+    }
+    
+    const now = new Date();
+    
+    // Calcular nueva fecha de expiración
+    let newExpirationDate;
+    if (license.expires_at && new Date(license.expires_at) > now) {
+        // Si aún no expiró, extender desde la fecha actual de expiración
+        newExpirationDate = new Date(license.expires_at);
+    } else {
+        // Si ya expiró, empezar desde hoy
+        newExpirationDate = new Date();
+    }
+    
+    newExpirationDate.setMonth(newExpirationDate.getMonth() + months);
+    
+    // Actualizar licencia
+    license.expires_at = newExpirationDate.toISOString();
+    license.last_renewal = now.toISOString();
+    license.renewal_count = (license.renewal_count || 0) + 1;
+    
+    if (payment_reference) {
+        license.payment_reference = payment_reference;
+    }
+    
+    // Reactivar si estaba inactiva
+    license.active = true;
+    
+    writeDB(db);
+    
+    console.log(`🔄 Suscripción renovada: ${key} hasta ${license.expires_at}`);
+    
+    res.json({
+        success: true,
+        message: 'Suscripción renovada exitosamente',
+        license_key: key,
+        new_expiration: license.expires_at,
+        months_added: months,
+        renewal_count: license.renewal_count
+    });
+});
+
+// NUEVO: Ver suscripciones próximas a vencer
+app.get('/admin/expiring-subscriptions', (req, res) => {
+    const { days = 7 } = req.query; // Por defecto, próximas a vencer en 7 días
+    
+    const db = readDB();
+    const now = new Date();
+    const futureDate = new Date();
+    futureDate.setDate(futureDate.getDate() + parseInt(days));
+    
+    const expiring = Object.values(db.licenses)
+        .filter(license => license.type === 'suscripcion')
+        .filter(license => license.expires_at)
+        .filter(license => {
+            const expirationDate = new Date(license.expires_at);
+            return expirationDate >= now && expirationDate <= futureDate;
+        })
+        .map(license => ({
+            license_key: license.key,
+            customer_email: license.customer_email || 'No registrado',
+            customer_phone: license.customer_phone || 'No registrado',
+            customer_business: license.customer_business || license.customer_name || 'No registrado',
+            expires_at: license.expires_at,
+            days_until_expiration: Math.ceil((new Date(license.expires_at) - now) / (1000 * 60 * 60 * 24)),
+            activated_at: license.activated_at,
+            last_validation: license.last_validation,
+            renewal_count: license.renewal_count || 0
+        }))
+        .sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
+    
+    res.json({
+        success: true,
+        expiring_in_days: parseInt(days),
+        total_expiring: expiring.length,
+        subscriptions: expiring
+    });
+});
+
+// NUEVO: Ver suscripciones ya expiradas
+app.get('/admin/expired-subscriptions', (req, res) => {
+    const db = readDB();
+    const now = new Date();
+    
+    const expired = Object.values(db.licenses)
+        .filter(license => license.type === 'suscripcion')
+        .filter(license => license.expires_at)
+        .filter(license => new Date(license.expires_at) < now)
+        .map(license => ({
+            license_key: license.key,
+            customer_email: license.customer_email || 'No registrado',
+            customer_phone: license.customer_phone || 'No registrado',
+            customer_business: license.customer_business || license.customer_name || 'No registrado',
+            expires_at: license.expires_at,
+            days_expired: Math.ceil((now - new Date(license.expires_at)) / (1000 * 60 * 60 * 24)),
+            last_validation: license.last_validation,
+            renewal_count: license.renewal_count || 0,
+            active: license.active
+        }))
+        .sort((a, b) => b.days_expired - a.days_expired); // Más expiradas primero
+    
+    res.json({
+        success: true,
+        total_expired: expired.length,
+        subscriptions: expired
+    });
+});
+
+// NUEVO: Notificar cliente sobre vencimiento (para futuro uso con email)
+app.post('/admin/notify-expiration', (req, res) => {
+    const { key, notification_type = 'email' } = req.body;
+    
+    if (!key) {
+        return res.json({ success: false, message: 'License key requerida' });
+    }
+    
+    const db = readDB();
+    const license = db.licenses[key];
+    
+    if (!license) {
+        return res.json({ success: false, message: 'Licencia no encontrada' });
+    }
+    
+    // Por ahora solo registrar la notificación (en futuro enviar email real)
+    if (!license.notifications) {
+        license.notifications = [];
+    }
+    
+    license.notifications.push({
+        type: notification_type,
+        sent_at: new Date().toISOString(),
+        message: 'Recordatorio de renovación de suscripción'
+    });
+    
+    writeDB(db);
+    
+    console.log(`📧 Notificación registrada para ${key}: ${license.customer_email}`);
+    
+    res.json({
+        success: true,
+        message: 'Notificación registrada',
+        customer_email: license.customer_email,
+        customer_phone: license.customer_phone,
+        notification_count: license.notifications.length
+    });
+});
+
 // NUEVO: Buscar cliente por email o teléfono
 app.get('/admin/search-customer', (req, res) => {
     const { query } = req.query;
