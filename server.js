@@ -93,14 +93,15 @@ app.get('/', (req, res) => {
         endpoints: {
             validate: '/validate?key=XXXX-XXXX-XXXX-XXXX&hardware=abc123',
             create: '/admin/create-license',
-            status: '/admin/status'
+            status: '/admin/status',
+            customers: '/admin/customers'
         }
     });
 });
 
-// ENDPOINT PRINCIPAL: Validar licencia
+// ENDPOINT PRINCIPAL: Validar licencia (MODIFICADO PARA CAPTURAR DATOS)
 app.get('/validate', (req, res) => {
-    const { key, hardware, type = 'unica' } = req.query;
+    const { key, hardware, type = 'unica', customer_email, customer_phone, customer_business } = req.query;
     
     if (!key) {
         return res.json({ 
@@ -141,6 +142,20 @@ app.get('/validate', (req, res) => {
             license.hardware_id = hardware;
             license.last_validation = now.toISOString();
             
+            // NUEVO: Guardar datos del cliente si se proporcionan
+            if (customer_email) {
+                license.customer_email = customer_email;
+                console.log(`📧 Email capturado: ${customer_email} para licencia: ${key}`);
+            }
+            if (customer_phone) {
+                license.customer_phone = customer_phone;
+                console.log(`📞 Teléfono capturado: ${customer_phone} para licencia: ${key}`);
+            }
+            if (customer_business) {
+                license.customer_business = customer_business;
+                console.log(`🏢 Negocio capturado: ${customer_business} para licencia: ${key}`);
+            }
+            
             // Actualizar stats
             db.stats.active_licenses++;
             
@@ -150,20 +165,47 @@ app.get('/validate', (req, res) => {
                 success: true, 
                 message: 'Licencia activada exitosamente',
                 license_type: 'unica',
-                activated_at: license.activated_at
+                activated_at: license.activated_at,
+                customer_registered: !!(customer_email || customer_phone || customer_business)
             });
         }
         
         // Si ya está activada, verificar hardware
         if (license.hardware_id === hardware) {
             license.last_validation = now.toISOString();
-            writeDB(db);
+            
+            // NUEVO: Actualizar datos del cliente si se proporcionan y no existen
+            let updated = false;
+            if (customer_email && !license.customer_email) {
+                license.customer_email = customer_email;
+                updated = true;
+                console.log(`📧 Email actualizado: ${customer_email} para licencia: ${key}`);
+            }
+            if (customer_phone && !license.customer_phone) {
+                license.customer_phone = customer_phone;
+                updated = true;
+                console.log(`📞 Teléfono actualizado: ${customer_phone} para licencia: ${key}`);
+            }
+            if (customer_business && !license.customer_business) {
+                license.customer_business = customer_business;
+                updated = true;
+                console.log(`🏢 Negocio actualizado: ${customer_business} para licencia: ${key}`);
+            }
+            
+            if (updated) {
+                writeDB(db);
+            }
             
             return res.json({ 
                 success: true, 
                 message: 'Licencia válida',
                 license_type: 'unica',
-                activated_at: license.activated_at
+                activated_at: license.activated_at,
+                customer_data: {
+                    email: license.customer_email || '',
+                    phone: license.customer_phone || '',
+                    business: license.customer_business || ''
+                }
             });
         } else {
             return res.json({ 
@@ -193,6 +235,20 @@ app.get('/validate', (req, res) => {
             license.hardware_id = hardware;
         }
         
+        // NUEVO: Capturar datos del cliente para suscripciones también
+        if (customer_email && !license.customer_email) {
+            license.customer_email = customer_email;
+            console.log(`📧 Email capturado (suscripción): ${customer_email} para licencia: ${key}`);
+        }
+        if (customer_phone && !license.customer_phone) {
+            license.customer_phone = customer_phone;
+            console.log(`📞 Teléfono capturado (suscripción): ${customer_phone} para licencia: ${key}`);
+        }
+        if (customer_business && !license.customer_business) {
+            license.customer_business = customer_business;
+            console.log(`🏢 Negocio capturado (suscripción): ${customer_business} para licencia: ${key}`);
+        }
+        
         writeDB(db);
         
         return res.json({ 
@@ -200,7 +256,12 @@ app.get('/validate', (req, res) => {
             message: 'Suscripción válida',
             license_type: 'suscripcion',
             expires_at: license.expires_at,
-            days_remaining: Math.ceil((expirationDate - now) / (1000 * 60 * 60 * 24))
+            days_remaining: Math.ceil((expirationDate - now) / (1000 * 60 * 60 * 24)),
+            customer_data: {
+                email: license.customer_email || '',
+                phone: license.customer_phone || '',
+                business: license.customer_business || ''
+            }
         });
     }
 
@@ -252,24 +313,69 @@ app.post('/admin/create-license', (req, res) => {
     });
 });
 
-// Ver estado del sistema
+// NUEVO: Ver base de datos de clientes
+app.get('/admin/customers', (req, res) => {
+    const db = readDB();
+    
+    const customers = Object.values(db.licenses)
+        .filter(license => license.activated_at) // Solo licencias activadas
+        .map(license => ({
+            license_key: license.key,
+            email: license.customer_email || 'No registrado',
+            phone: license.customer_phone || 'No registrado', 
+            business: license.customer_business || license.customer_name || 'No registrado',
+            license_type: license.type,
+            activated_at: license.activated_at,
+            last_validation: license.last_validation,
+            hardware_id: license.hardware_id,
+            expires_at: license.expires_at || null
+        }))
+        .sort((a, b) => new Date(b.activated_at) - new Date(a.activated_at)); // Más recientes primero
+    
+    res.json({
+        success: true,
+        total_customers: customers.length,
+        customers: customers
+    });
+});
+
+// Ver estado del sistema (MEJORADO)
 app.get('/admin/status', (req, res) => {
     const db = readDB();
     
+    const allLicenses = Object.values(db.licenses);
+    const activatedLicenses = allLicenses.filter(l => l.activated_at);
+    const customersWithEmail = activatedLicenses.filter(l => l.customer_email);
+    const customersWithPhone = activatedLicenses.filter(l => l.customer_phone);
+    const customersWithBusiness = activatedLicenses.filter(l => l.customer_business || l.customer_name);
+    
     const stats = {
         ...db.stats,
-        total_licenses: Object.keys(db.licenses).length,
-        active_licenses: Object.values(db.licenses).filter(l => l.activated_at).length,
-        unique_licenses: Object.values(db.licenses).filter(l => l.type === 'unica').length,
-        subscription_licenses: Object.values(db.licenses).filter(l => l.type === 'suscripcion').length
+        total_licenses: allLicenses.length,
+        activated_licenses: activatedLicenses.length,
+        unique_licenses: allLicenses.filter(l => l.type === 'unica').length,
+        subscription_licenses: allLicenses.filter(l => l.type === 'suscripcion').length,
+        customers_with_email: customersWithEmail.length,
+        customers_with_phone: customersWithPhone.length,
+        customers_with_business: customersWithBusiness.length,
+        completion_rate: activatedLicenses.length > 0 ? 
+            Math.round((customersWithEmail.length / activatedLicenses.length) * 100) : 0
     };
     
     res.json({
         success: true,
         stats: stats,
-        recent_licenses: Object.values(db.licenses)
-            .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+        recent_activations: activatedLicenses
+            .sort((a, b) => new Date(b.activated_at) - new Date(a.activated_at))
             .slice(0, 10)
+            .map(l => ({
+                key: l.key,
+                email: l.customer_email || 'No registrado',
+                phone: l.customer_phone || 'No registrado',
+                business: l.customer_business || l.customer_name || 'No registrado',
+                activated_at: l.activated_at,
+                license_type: l.type
+            }))
     });
 });
 
@@ -307,6 +413,73 @@ app.post('/admin/deactivate', (req, res) => {
     });
 });
 
+// NUEVO: Exportar datos de clientes (CSV)
+app.get('/admin/export-customers', (req, res) => {
+    const db = readDB();
+    
+    const customers = Object.values(db.licenses)
+        .filter(license => license.activated_at)
+        .map(license => ({
+            license_key: license.key,
+            email: license.customer_email || '',
+            phone: license.customer_phone || '',
+            business: license.customer_business || license.customer_name || '',
+            license_type: license.type,
+            activated_at: license.activated_at,
+            last_validation: license.last_validation
+        }));
+    
+    // Generar CSV
+    const csvHeaders = 'License Key,Email,Phone,Business,License Type,Activated At,Last Validation\n';
+    const csvRows = customers.map(c => 
+        `${c.license_key},${c.email},${c.phone},"${c.business}",${c.license_type},${c.activated_at},${c.last_validation}`
+    ).join('\n');
+    
+    const csvContent = csvHeaders + csvRows;
+    
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="qaja_customers.csv"');
+    res.send(csvContent);
+});
+
+// NUEVO: Buscar cliente por email o teléfono
+app.get('/admin/search-customer', (req, res) => {
+    const { query } = req.query;
+    
+    if (!query) {
+        return res.json({ success: false, message: 'Query requerido' });
+    }
+    
+    const db = readDB();
+    const searchTerm = query.toLowerCase();
+    
+    const results = Object.values(db.licenses)
+        .filter(license => license.activated_at)
+        .filter(license => 
+            (license.customer_email && license.customer_email.toLowerCase().includes(searchTerm)) ||
+            (license.customer_phone && license.customer_phone.includes(searchTerm)) ||
+            (license.customer_business && license.customer_business.toLowerCase().includes(searchTerm)) ||
+            (license.customer_name && license.customer_name.toLowerCase().includes(searchTerm)) ||
+            license.key.includes(searchTerm.toUpperCase())
+        )
+        .map(license => ({
+            license_key: license.key,
+            email: license.customer_email || 'No registrado',
+            phone: license.customer_phone || 'No registrado',
+            business: license.customer_business || license.customer_name || 'No registrado',
+            license_type: license.type,
+            activated_at: license.activated_at,
+            last_validation: license.last_validation
+        }));
+    
+    res.json({
+        success: true,
+        query: query,
+        results_count: results.length,
+        results: results
+    });
+});
+
 // Inicializar base de datos al arrancar
 initDatabase();
 
@@ -314,6 +487,7 @@ initDatabase();
 app.listen(PORT, () => {
     console.log(`🚀 Servidor de licencias corriendo en puerto ${PORT}`);
     console.log(`📊 Dashboard: http://localhost:${PORT}/admin/status`);
+    console.log(`👥 Clientes: http://localhost:${PORT}/admin/customers`);
     console.log(`🔑 Validación: http://localhost:${PORT}/validate?key=XXXX-XXXX-XXXX-XXXX&hardware=abc123`);
 });
 
