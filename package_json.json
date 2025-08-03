@@ -1,0 +1,25 @@
+{
+  "name": "pos-license-server",
+  "version": "1.0.0",
+  "description": "Sistema de licencias para POS - Compra única y suscripciones",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test-server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "license",
+    "pos",
+    "authentication",
+    "api"
+  ],
+  "author": "Tu Nombre",
+  "license": "MIT"
+}
